@@ -1,0 +1,274 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[spanish]{babel}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{float}
+
+\geometry{left=2.5cm, right=2.5cm, top=2.5cm, bottom=2.5cm}
+
+% Configuración de colores para el código fuente
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.96,0.96,0.96}
+\definecolor{keywordcolor}{rgb}{0.0,0.4,0.7}
+
+\lstdefinestyle{mystyle}{
+    backgroundcolor=\color{backcolour},   
+    commentstyle=\itshape\color{codegreen},
+    keywordstyle=\bfseries\color{keywordcolor},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,         
+    breaklines=true,                 
+    captionpos=b,                    
+    keepspaces=true,                 
+    numbers=left,                    
+    numbersep=10pt,                  
+    showspaces=false,                
+    showstringspaces=false,
+    showtabs=false,                  
+    tabsize=4,
+    frame=single,
+    rulecolor=\color{lightgray}
+}
+
+\lstset{style=mystyle}
+
+\title{\textbf{Informe Técnico Detallado: Arquitectura e Implementación del Pipeline de Refactorización Automática}}
+\author{Primer Avance - Tesis Doctoral}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+
+\begin{abstract}
+El presente informe documenta a profundidad la arquitectura, algoritmos e implementación del pipeline automatizado desarrollado para el proyecto de investigación: \textit{``Refactorización automática de Code Smells mediante LLMs para la mitigación de la deuda técnica en proyectos de código abierto en Python''}. A lo largo de este documento, se desglosa el funcionamiento de los tres subsistemas principales: el motor de extracción y manejo de repositorios Git, el analizador estático basado en Árboles de Sintaxis Abstracta (AST) para la detección de anomalías de diseño (\textit{code smells}), y el orquestador de refactorización impulsado por el modelo fundacional Gemini de Google mediante técnicas avanzadas de \textit{Few-Shot Prompting}. Se proporcionan fragmentos de código clave para ilustrar la lógica de ingeniería de software aplicada.
+\end{abstract}
+
+\section{Introducción y Marco Arquitectónico}
+
+La mitigación de la deuda técnica en ecosistemas de código abierto es un desafío que requiere la constante intervención humana para identificar y corregir defectos de diseño, conocidos en la literatura como \textit{Code Smells} (Fowler, 2018). Este proyecto automatiza dicho proceso mediante la integración de técnicas de análisis de código estático tradicional con Modelos de Lenguaje de Gran Escala (LLMs).
+
+La arquitectura del sistema, programada íntegramente en Python 3, adopta un diseño modular compuesto por cuatro componentes fuertemente tipados e independientes:
+\begin{itemize}
+    \item \textbf{\texttt{extractor.py}}: Encargado de la interacción con el control de versiones, clonación de repositorios y filtrado de la base de código.
+    \item \textbf{\texttt{smell\_detector.py}}: Motor de análisis estático que evalúa heurísticas de calidad y métricas de software.
+    \item \textbf{\texttt{refactor\_engine.py}}: Interfaz de inferencia que construye la heurística de \textit{prompting} estructurado y se comunica con la API de Gemini.
+    \item \textbf{\texttt{main.py}}: Punto de entrada y orquestador del flujo de datos que centraliza las operaciones y emite reportes.
+\end{itemize}
+
+\section{Fase 1: Extracción y Procesamiento de Repositorios}
+
+El submódulo \texttt{ExtractorDeCodigo} abstrae la complejidad de interactuar con el sistema de control de versiones Git. Su propósito no es solo descargar el código, sino prepararlo para un análisis limpio, evadiendo artefactos que puedan sesgar la detección.
+
+\subsection{Clonación Superficial (Shallow Cloning)}
+Para analizar la deuda técnica actual, el historial completo de \textit{commits} es redundante y computacionalmente costoso de descargar. El extractor utiliza la librería \texttt{GitPython} para realizar un \textit{shallow clone} con profundidad de 1.
+
+\begin{lstlisting}[language=Python, caption=Implementación de clonación superficial]
+def clonar_repositorio(self, profundidad: int = 1) -> str:
+    # Si el directorio ya existe, validamos su integridad
+    if os.path.exists(self.directorio_clon):
+        try:
+            self.repositorio = Repo(self.directorio_clon)
+            return self.directorio_clon
+        except InvalidGitRepositoryError:
+            shutil.rmtree(self.directorio_clon)
+
+    # Clonado superficial limitando la historia al HEAD actual
+    self.repositorio = Repo.clone_from(
+        url=self.url_repositorio,
+        to_path=self.directorio_clon,
+        depth=profundidad 
+    )
+    return self.directorio_clon
+\end{lstlisting}
+
+\subsection{Filtrado Semántico del Sistema de Archivos}
+Los repositorios de Python contienen múltiples directorios que no son objeto de refactorización arquitectónica (ej., dependencias, cachés, metadatos). El método \texttt{listar\_archivos\_python} implementa un recorrido en profundidad (\textit{Depth-First Search}) del árbol de directorios omitiendo rutas no deseadas en tiempo de evaluación, optimizando así el uso de I/O.
+
+\begin{lstlisting}[language=Python, caption=Recorrido y filtrado de árbol de archivos]
+def listar_archivos_python(self) -> List[str]:
+    archivos_python = []
+    # Conjunto O(1) para filtrado rapido de directorios ignorados
+    directorios_excluidos = {
+        '__pycache__', '.git', '.tox', '.eggs', 'node_modules',
+        'venv', '.venv', 'env', 'migrations', '.github'
+    }
+
+    for raiz, directorios, archivos in os.walk(self.directorio_clon):
+        # Modificacion in-place de la lista de directorios
+        directorios[:] = [d for d in directorios if d not in directorios_excluidos]
+
+        for archivo in archivos:
+            if archivo.endswith('.py'):
+                ruta_completa = os.path.join(raiz, archivo)
+                ruta_relativa = os.path.relpath(ruta_completa, self.directorio_clon)
+                archivos_python.append(ruta_relativa)
+
+    return sorted(archivos_python)
+\end{lstlisting}
+
+Una vez seleccionados, los archivos se leen utilizando un mecanismo de recuperación de decodificación (\textit{fallback decoding}), intentando primero \texttt{UTF-8} y cayendo en \texttt{latin-1} si se lanza una excepción de \texttt{UnicodeDecodeError}.
+
+\section{Fase 2: Motor de Detección de Code Smells}
+
+La clase \texttt{DetectorDeSmells} prescinde del uso de Expresiones Regulares para la evaluación del código, ya que el código fuente no es un lenguaje regular. En su lugar, analiza la estructura algorítmica parseando el código a un Árbol de Sintaxis Abstracta (AST) usando la librería nativa \texttt{ast} de Python.
+
+\subsection{Recorrido del AST y Despacho de Detecciones}
+El método \texttt{analizar\_codigo} genera el AST y extrae de forma aislada los nodos de tipo función (\texttt{FunctionDef}) o función asíncrona (\texttt{AsyncFunctionDef}).
+
+\begin{lstlisting}[language=Python, caption=Parsing del AST y evaluación por nodo]
+def analizar_codigo(self, codigo_fuente: str, archivo: str) -> List[CodeSmellDetectado]:
+    smells_detectados = []
+    try:
+        arbol = ast.parse(codigo_fuente)
+    except SyntaxError:
+        return smells_detectados # Ignorar archivos con sintaxis invalida
+
+    for nodo in ast.walk(arbol):
+        if isinstance(nodo, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            codigo_funcion = self._extraer_codigo_funcion(codigo_fuente, nodo)
+            
+            # Encadenamiento de reglas heuristicas
+            if smell := self._detectar_funcion_larga(nodo, codigo_funcion, archivo):
+                smells_detectados.append(smell)
+            
+            if smell := self._detectar_parametros_excesivos(nodo, codigo_funcion, archivo):
+                smells_detectados.append(smell)
+                
+            # Evaluaciones adicionales de complejidad y anidamiento...
+            
+    return smells_detectados
+\end{lstlisting}
+
+\subsection{Lógica de Detección por Tipo de Smell}
+
+El sistema identifica cuatro categorías de olores en el código:
+
+\subsubsection{Long Method (Función Larga)}
+Se contabilizan las líneas de código de forma semántica. No se cuentan saltos de línea vacíos ni comentarios. Si la longitud excede el umbral preconfigurado (por defecto 20 líneas), se cataloga como smell. La severidad se gradúa matemáticamente: por encima de 3 veces el umbral, se considera \textit{Crítica}.
+
+\subsubsection{Long Parameter List (Parámetros Excesivos)}
+A través del AST, se extraen los argumentos formales de la función visitando la lista \texttt{nodo.args.args}. El algoritmo excluye los parámetros \texttt{self} y \texttt{cls} del conteo, ya que son mandatorios en el paradigma de Orientación a Objetos en Python. Un recuento superior a 4 parámetros desencadena una advertencia, recomendando la técnica de refactorización \textit{Introduce Parameter Object}.
+
+\subsubsection{High Cyclomatic Complexity (Complejidad Ciclomática de McCabe)}
+Se utiliza la librería externa \texttt{radon} para determinar el número de caminos de ejecución independientes a través de una función. Este valor $(M = E - N + 2P)$ es vital para entender la mantenibilidad.
+
+\begin{lstlisting}[language=Python, caption=Análisis de Complejidad Ciclomática con Radon]
+from radon.complexity import cc_visit
+import textwrap
+
+def _detectar_complejidad_alta(self, nodo: ast.FunctionDef, codigo: str, archivo: str):
+    # Dedent necesario porque extraer una funcion de una clase arrastra indentacion
+    codigo_dedent = textwrap.dedent(codigo)
+    resultados = cc_visit(codigo_dedent)
+
+    for resultado in resultados:
+        if (resultado.name == nodo.name and
+            resultado.complexity > self.umbrales["max_complejidad_ciclomatica"]):
+            
+            return CodeSmellDetectado(
+                tipo="High Cyclomatic Complexity",
+                severidad=self._severidad_complejidad(resultado.complexity),
+                metricas={"complejidad": resultado.complexity}
+                # ...
+            )
+\end{lstlisting}
+
+\subsubsection{Deeply Nested Code (Código Profundamente Anidado)}
+El anidamiento se mide empíricamente analizando la sangría del código fuente. Se calcula el desplazamiento \textit{(offset)} del nivel de indentación actual relativo a la indentación base de la firma de la función. Un anidamiento superior a 4 niveles sugiere la necesidad inminente de usar \textit{Guard Clauses} (Retornos Tempranos).
+
+\section{Fase 3: Refactorización Orquestada por LLM (Gemini)}
+
+El módulo \texttt{MotorDeRefactorizacion} no delega la refactorización a un simple prompt "Zero-Shot". La literatura científica demuestra que los LLMs pueden "alucinar" o producir código no funcional sin un contexto adecuado. Por lo tanto, se diseñó un flujo de \textit{Few-Shot Prompting} utilizando el SDK oficial \texttt{google-genai}.
+
+\subsection{Estructura del Few-Shot Prompting}
+El sistema mantiene un diccionario constante denominado \texttt{EJEMPLOS\_FEW\_SHOT}. Por cada tipo de \textit{Code Smell}, existe una colección de pares didácticos:
+\begin{enumerate}
+    \item \textbf{Código Malo}: Un fragmento sintético que exhibe el patrón defectuoso.
+    \item \textbf{Código Bueno}: La refactorización manual ideal.
+    \item \textbf{Explicación}: Justificación técnica del por qué el código bueno es superior (ej., "Se aplicó Extract Method para elevar la cohesión").
+\end{enumerate}
+
+Esta estructura permite que la función \texttt{construir\_conversacion\_few\_shot} ensamble un historial de chat simulado.
+
+\begin{lstlisting}[language=Python, caption=Ensamblaje del contexto histórico del LLM]
+from google.genai import types
+
+def construir_conversacion_few_shot(self, codigo_smell: str, tipo_smell: str):
+    # Definicion del Meta-Prompt
+    system_instruction = "Eres un ingeniero experto en refactorizacion de codigo Python..."
+    contents = []
+    
+    # Inyeccion de aprendizaje en contexto (In-Context Learning)
+    for ejemplo in ejemplos:
+        contents.append(types.Content(
+            role="user",
+            parts=[types.Part.from_text(text=f"Refactoriza: {ejemplo['codigo_malo']}")]
+        ))
+        contents.append(types.Content(
+            role="model",
+            parts=[types.Part.from_text(text=f"{ejemplo['codigo_bueno']}\n\nEXPLICACION:\n{ejemplo['explicacion']}")]
+        ))
+
+    # Inyeccion del problema objetivo real
+    contents.append(types.Content(
+        role="user",
+        parts=[types.Part.from_text(text=f"Refactoriza este codigo real: {codigo_smell}")]
+    ))
+    
+    return system_instruction, contents
+\end{lstlisting}
+
+\subsection{Configuración de Generación e Inferencia}
+Para garantizar que las transformaciones de código sean estrictamente lógicas y reproducibles, se ha configurado el modelo \texttt{gemini-3.5-flash} para que tenga una alta predecibilidad reduciendo su entropía algorítmica.
+
+\begin{lstlisting}[language=Python, caption=Ejecución de Inferencia Determinística]
+config = types.GenerateContentConfig(
+    system_instruction=system_instruction,
+    temperature=0.3,         # Valor conservador para restringir creatividad excesiva
+    max_output_tokens=8192,  # Suficiente para archivos Python grandes
+    top_p=0.9,               # Muestreo de nucleo estandar
+)
+
+respuesta = self.cliente.models.generate_content(
+    model=self.modelo,
+    contents=contents,
+    config=config,
+)
+\end{lstlisting}
+
+\subsection{Parseo Estructurado de la Salida}
+Una vez obtenida la respuesta en texto libre del modelo, la función \texttt{parsear\_respuesta} implementa una máquina de estados rudimentaria para interceptar bloques delimitados por marcadores Markdown (\texttt{```python}). Todo el contenido fuera del bloque es extraído y sanitizado como "explicación", mientras que el bloque de código extraído se verifica para validarlo.
+
+\section{Integración y Orquestación (\texttt{main.py})}
+
+El archivo \texttt{main.py} funge como el controlador central. Su flujo de ejecución es lineal e ininterrumpido:
+\begin{enumerate}
+    \item Llama al extractor para clonar el repositorio de GitHub (por defecto \texttt{requests}).
+    \item Ejecuta heurísticas para encontrar el archivo de código más largo (que tiene estadísticamente mayor probabilidad de contener deuda técnica).
+    \item Pasa el código al \texttt{DetectorDeSmells}, recolectando una métrica general.
+    \item Filtra la lista priorizando mediante el método \texttt{seleccionar\_peor\_smell}, ponderando la "Severidad" (Crítica > Alta > Media > Baja).
+    \item Envía exclusivamente el fragmento del peor smell a Gemini a través del \texttt{MotorDeRefactorizacion}.
+    \item Finalmente, enruta la salida hacia el método \texttt{guardar\_resultados}, generando reportes físicos para futuras revisiones (antes vs después).
+\end{enumerate}
+
+\section{Conclusiones y Trabajo Futuro}
+
+El desarrollo actual demuestra sólidas capacidades para automatizar la mitigación de deuda técnica integrando metodologías clásicas de análisis de grafos (AST) con arquitecturas de \textit{Transformers}. El uso pionero del SDK oficial de \texttt{google-genai} asegura compatibilidad futura y una óptima gestión de contextos multi-turno.
+
+Como trabajo futuro de la investigación doctoral, se propone habilitar refactorizaciones a nivel de arquitectura completa (cambios inter-archivo) e incorporar un agente autónomo capaz de ejecutar \textit{unit tests} generados dinámicamente para asegurar que la funcionalidad original ha sido matemáticamente preservada post-refactorización.
+
+\end{document}

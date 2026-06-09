@@ -1,0 +1,15 @@
+# Variables de entorno con claves sensibles
+.env
+
+# Repositorios clonados
+repos_clonados/
+
+# Resultados generados
+resultados/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
